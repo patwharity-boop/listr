@@ -1,0 +1,4 @@
+flask==3.0.2
+gunicorn==21.2.0
+twilio==9.0.5
+psycopg2-binary==2.9.9
