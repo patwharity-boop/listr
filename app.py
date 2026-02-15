@@ -1,17 +1,14 @@
 # app.py
 # Listr: SMS shopping list using Twilio + Render + Postgres
 #
-# Behavior:
-# - Any text (except "send") adds an item to the sender's list
-# - "send" replies with the full list, then clears it
-#
-# Also serves:
-# - GET /            -> health check ("Listr is alive.")
-# - GET /privacy     -> serves privacy.html
-# - GET /terms       -> serves terms.html
+# Routes:
+# - GET /         -> "Listr is alive."
+# - GET /privacy  -> serves privacy.html
+# - GET /terms    -> serves terms.html
+# - GET /debug    -> shows what files/routes exist (for troubleshooting)
+# - POST /sms     -> Twilio webhook
 
 import os
-
 from flask import Flask, request, Response, send_file
 from twilio.twiml.messaging_response import MessagingResponse
 import psycopg2
@@ -19,22 +16,21 @@ import psycopg2.extras
 
 app = Flask(__name__)
 
+# Absolute folder where this app.py lives (works on Render)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PRIVACY_PATH = os.path.join(BASE_DIR, "privacy.html")
+TERMS_PATH = os.path.join(BASE_DIR, "terms.html")
 
-# -----------------------------------------
-# DATABASE: connect using Render env var DATABASE_URL
-# -----------------------------------------
+
+# -------------------------
+# DB
+# -------------------------
 def get_conn():
     db_url = os.environ.get("DATABASE_URL")
-
-    # If DATABASE_URL isn't set yet, fail loudly (helps debugging)
     if not db_url:
         raise RuntimeError("DATABASE_URL environment variable is not set in Render.")
-
-    # Some providers use postgres:// but psycopg2 prefers postgresql://
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
-
-    # Render managed Postgres typically requires SSL
     return psycopg2.connect(db_url, sslmode="require")
 
 
@@ -54,9 +50,9 @@ def init_db():
         conn.commit()
 
 
-# -----------------------------------------
-# WEB PAGES: health + policy pages for Twilio
-# -----------------------------------------
+# -------------------------
+# Web routes
+# -------------------------
 @app.get("/")
 def health():
     return "Listr is alive."
@@ -64,19 +60,33 @@ def health():
 
 @app.get("/privacy")
 def privacy():
-    # privacy.html is in the repo root (same folder as app.py)
-    return send_file("privacy.html")
+    return send_file(PRIVACY_PATH)
 
 
 @app.get("/terms")
 def terms():
-    # terms.html is in the repo root (same folder as app.py)
-    return send_file("terms.html")
+    return send_file(TERMS_PATH)
 
 
-# -----------------------------------------
-# TWILIO WEBHOOK: incoming SMS hits POST /sms
-# -----------------------------------------
+@app.get("/debug")
+def debug():
+    # Shows: current folder, which files exist, and all Flask routes
+    files_here = sorted(os.listdir(BASE_DIR))
+    routes = sorted([str(r) for r in app.url_map.iter_rules()])
+    body = (
+        "DEBUG\n\n"
+        f"BASE_DIR: {BASE_DIR}\n\n"
+        f"privacy.html exists? {os.path.exists(PRIVACY_PATH)}\n"
+        f"terms.html exists? {os.path.exists(TERMS_PATH)}\n\n"
+        f"Files in BASE_DIR:\n{files_here}\n\n"
+        f"Flask routes:\n{routes}\n"
+    )
+    return Response(body, mimetype="text/plain")
+
+
+# -------------------------
+# Twilio SMS webhook
+# -------------------------
 @app.post("/sms")
 def sms():
     init_db()
@@ -87,7 +97,6 @@ def sms():
 
     resp = MessagingResponse()
 
-    # If user texts SEND -> return list and clear it
     if lower == "send":
         with get_conn() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -99,23 +108,22 @@ def sms():
 
         if not rows:
             resp.message("Your Listr is empty. Text items like 'eggs' to add them.")
-        else:
-            msg = "Your Listr:\n"
-            for i, row in enumerate(rows, 1):
-                msg += f"{i}) {row['body']}\n"
-            msg += "\nCleared ✅"
-            resp.message(msg)
+            return Response(str(resp), mimetype="text/xml")
 
-            # Clear after sending
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM items WHERE phone=%s;", (from_number,))
-                conn.commit()
+        msg = "Your Listr:\n"
+        for i, row in enumerate(rows, 1):
+            msg += f"{i}) {row['body']}\n"
+        msg += "\nCleared ✅"
+        resp.message(msg)
 
-        # IMPORTANT: Twilio expects XML, so return as text/xml
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM items WHERE phone=%s;", (from_number,))
+            conn.commit()
+
         return Response(str(resp), mimetype="text/xml")
 
-    # Otherwise: treat message as an item to add
+    # default: add item
     if not body:
         resp.message("Text an item (like 'eggs'). Text SEND when you're ready.")
         return Response(str(resp), mimetype="text/xml")
