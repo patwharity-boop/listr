@@ -1,48 +1,29 @@
-# =========================================
-# LISTR (simple version)
-# =========================================
-# Goal:
-# - User texts ANYTHING (ex: "eggs", "toilet paper")
-# - We store it in a database list tied to THEIR phone number
-# - ONLY COMMAND is: "send"
-#     - If user texts "send", we reply with their list
-#     - Then we clear their list so they start fresh
-#
-# Key pieces:
-# - Twilio = receives SMS, forwards to our webhook (/sms)
-# - Render = runs this Flask app on the internet
-# - Postgres = stores items (so it survives restarts)
-# =========================================
-
 import os
-from flask import Flask, request
+from flask import Flask, request, Response
 from twilio.twiml.messaging_response import MessagingResponse
 import psycopg2
-import psycopg2.extras
 
-# -----------------------------------------
-# Create the Flask application
-# -----------------------------------------
 app = Flask(__name__)
 
 # -----------------------------------------
-# Connect to Postgres using DATABASE_URL (Render env var)
+# DATABASE CONNECTION
 # -----------------------------------------
 def get_conn():
+    # Render provides DATABASE_URL via Environment Variables
     db_url = os.environ.get("DATABASE_URL")
-
-    # If DATABASE_URL is missing, crash with a clear error
     if not db_url:
-        raise RuntimeError("DATABASE_URL environment variable is not set")
+        raise RuntimeError("DATABASE_URL environment variable is not set.")
 
-    # Render sometimes uses postgres:// but psycopg2 expects postgresql://
+    # Some platforms still use postgres:// but psycopg expects postgresql://
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
 
+    # Render Postgres commonly requires SSL
     return psycopg2.connect(db_url, sslmode="require")
 
+
 # -----------------------------------------
-# Create table if it doesn't exist yet
+# DATABASE INIT (creates table if missing)
 # -----------------------------------------
 def init_db():
     with get_conn() as conn:
@@ -57,70 +38,69 @@ def init_db():
             """)
         conn.commit()
 
+
 # -----------------------------------------
-# Browser check (optional)
-# Visiting https://YOUR-RENDER-URL/ shows this text
+# HEALTH CHECK (Render uses this sometimes)
 # -----------------------------------------
 @app.get("/")
 def health():
     return "Listr is alive."
 
+
 # -----------------------------------------
-# Twilio webhook endpoint
-# Twilio POSTs here when an SMS comes in
+# TWILIO WEBHOOK ENDPOINT
+# Twilio POSTs incoming SMS here
 # -----------------------------------------
 @app.post("/sms")
 def sms():
     init_db()
 
-    # Sender phone number (this is how we keep separate lists)
-    from_number = (request.form.get("From") or "").strip()
+    from_number = request.form.get("From", "").strip()
+    body = request.form.get("Body", "").strip()
 
-    # Message content (the item or "send")
-    body = (request.form.get("Body") or "").strip()
-    lower = body.lower()
-
-    # Build Twilio SMS response
     resp = MessagingResponse()
 
-    # If message is blank, ask them to text something
+    # Safety check
+    if not from_number:
+        resp.message("Missing From number.")
+        return Response(str(resp), mimetype="application/xml")
+
+    # If message body is empty
     if not body:
-        resp.message("Text an item (like 'eggs'). When ready, text 'send'.")
-        return str(resp)
+        resp.message("Text something to add it to your list. Text 'send' to receive the list.")
+        return Response(str(resp), mimetype="application/xml")
+
+    lower = body.lower()
 
     # -----------------------------------------
-    # ONLY COMMAND: "send"
-    # Send the list back, then clear it
+    # COMMAND: SEND
+    # Replies with the list, then clears it
     # -----------------------------------------
     if lower == "send":
         with get_conn() as conn:
-            # 1) Fetch all items for this phone number
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            with conn.cursor() as cur:
                 cur.execute(
                     "SELECT body FROM items WHERE phone=%s ORDER BY id;",
-                    (from_number,),
+                    (from_number,)
                 )
                 rows = cur.fetchall()
 
-            # 2) If list is empty, tell them
             if not rows:
-                resp.message("Your Listr is empty. Text items first, then text 'send'.")
-                return str(resp)
+                resp.message("Your list is empty. Text an item like 'eggs' to add it.")
+                return Response(str(resp), mimetype="application/xml")
 
-            # 3) Build message
-            msg = "Your Listr:\n"
-            for i, row in enumerate(rows, 1):
-                msg += f"{i}) {row['body']}\n"
+            # Build list message
+            msg_lines = ["Your Listr:"]
+            for i, (item_body,) in enumerate(rows, 1):
+                msg_lines.append(f"{i}) {item_body}")
 
-            msg += "\n✅ Sent and cleared."
-
-            # 4) Clear list
+            # Clear after sending
             with conn.cursor() as cur2:
                 cur2.execute("DELETE FROM items WHERE phone=%s;", (from_number,))
             conn.commit()
 
-        resp.message(msg)
-        return str(resp)
+        resp.message("\n".join(msg_lines) + "\n\nCleared ✅")
+        return Response(str(resp), mimetype="application/xml")
 
     # -----------------------------------------
     # DEFAULT: Anything else is treated as an item to add
@@ -134,8 +114,4 @@ def sms():
         conn.commit()
 
     resp.message(f"Added: {body} ✅ (Text 'send' when ready)")
-    return str(resp)
-# This starts the Flask web server on Render
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    return Response(str(resp), mimetype="application/xml")
