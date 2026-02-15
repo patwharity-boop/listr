@@ -5,7 +5,7 @@
 # - "send" replies with the full list, then clears it
 
 import os
-from flask import Flask, request, Response
+from flask import Flask, request, Response, send_file
 from twilio.twiml.messaging_response import MessagingResponse
 import psycopg2
 import psycopg2.extras
