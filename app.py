@@ -20,6 +20,7 @@ app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PRIVACY_PATH = os.path.join(BASE_DIR, "privacy.html")
 TERMS_PATH = os.path.join(BASE_DIR, "terms.html")
+SMS_PATH = os.path.join(BASE_DIR, "sms.html")
 
 
 # -------------------------
@@ -67,6 +68,9 @@ def privacy():
 def terms():
     return send_file(TERMS_PATH)
 
+@app.get("/sms-info")
+def sms_info():
+    return send_file(SMS_PATH)
 
 @app.get("/debug")
 def debug():
